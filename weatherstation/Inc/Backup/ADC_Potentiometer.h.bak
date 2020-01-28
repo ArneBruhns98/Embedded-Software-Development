@@ -1,0 +1,37 @@
+/**
+  ******************************************************************************
+  * @file           : ADC_Potentiometer.h
+  * @brief          : Header for ADC_potentiometer.h.c file.
+  *                   This file contains the headers of the functions used for
+  *                   determination of the humidity in our project.
+  ******************************************************************************
+  *
+  * @author			: Felix Lohse & Arne Bruhns
+  *
+  *
+  ******************************************************************************
+  */
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Used for types like uint16_t ----------------------------------------------*/
+#include "stm32f0xx_hal.h"
+
+/* Used for GPIO Ports and Pins ----------------------------------------------*/
+#include "main.h"
+
+/* Used for delay in us function ---------------------------------------------*/
+#include "delayus_lib.h"
+
+/**
+  * @brief Function used to calculate humidity dependent on the measured voltage at the potentiometer.
+  * @param ADC_HandleTypeDef* hadc address of the ADC handle structure definition.
+  * @retval int the calculated humidity.
+  */
+uint16_t calculateHumidity(uint32_t uncalc_value);
+
+#ifdef __cplusplus
+}
+#endif

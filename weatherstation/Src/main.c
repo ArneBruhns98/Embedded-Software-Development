@@ -1,0 +1,872 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file           : main.c
+  * @brief          : Main program body
+  ******************************************************************************
+  * @attention
+  *
+  * <h2><center>&copy; Copyright (c) 2019 STMicroelectronics.
+  * All rights reserved.</center></h2>
+  *
+  * This software component is licensed by ST under BSD 3-Clause license,
+  * the "License"; You may not use this file except in compliance with the
+  * License. You may obtain a copy of the License at:
+  *                        opensource.org/licenses/BSD-3-Clause
+  *
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+
+/* Includes ------------------------------------------------------------------*/
+#include "main.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+#include "onewire_DS1820.h"		// Onewire library for DS1820
+#include "LCD_2x16.h"			// library for the display
+/* USER CODE END Includes */
+
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+/*
+ * Defines that configure the delays between tasks.
+ */
+#define READYTOCALLFUNC 	80	// TOCALLFUNC * 6,25ms =  time between outputs
+#define DISPLAYUPDATE 		80	// DISPLAYUPDATE * 6,25ms = time between display updates
+#define MEASUREMENT			80  // MEASUREMENT * 6,25ms = time between measurements
+#define TOOGLEMODE			800 // TOOGLEMODE * 6,25ms = time between alternations in view mode toggle
+
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+
+/* USER CODE END PM */
+
+/* Private variables ---------------------------------------------------------*/
+ADC_HandleTypeDef hadc;
+
+RTC_HandleTypeDef hrtc;
+
+TIM_HandleTypeDef htim6;
+
+UART_HandleTypeDef huart2;
+
+/* USER CODE BEGIN PV */
+/*
+ * Arrays to iterate and choose port and pin from to toggle depending on colCounter
+ * for multiplexing in 4x4 keypad.
+ */
+uint16_t GPIO_PINS[4] = {col0_Pin, col1_Pin, col2_Pin, col3_Pin};
+GPIO_TypeDef* GPIO_PORTS[4] = {col0_GPIO_Port, col1_GPIO_Port, col2_GPIO_Port, col3_GPIO_Port};
+
+/*
+ * colCounter is used to track the currently active column on 4x4 keypad.
+ */
+uint16_t colCounter = 0;
+
+/*
+ * Used to determine if in next step of multiplexing, column pin has to be set or reset.
+ */
+uint16_t current_Port_active = FALSE;
+
+/*
+ * Declaration of functionpointer to be called, when call_counter reached READYTOCALLFUNC
+ * And default function pointer to reset after function was called.
+ */
+void (*func_to_call_next_ptr)();
+void (*default_func_ptr)();
+
+/*
+ * Counter which are incremented by main timer to implemented different delays for different tasks.
+ * When a timer reached it's corresponding threshold given by defines. A flag is set.
+ */
+uint16_t call_counter = 0;							// used for function call, selected by keypad
+uint16_t display_counter = 0;						// used for display updates
+uint16_t measurement_counter = 0;					// used for measurements
+uint16_t toggle_view_mode_counter = 0;				// used to change view in toggle view mode
+
+/*
+ * Flags used in main loop to handle tasks when a specific delay for each operation is reached.
+ * If flag is TRUE, operation is executed in current iteration.
+ * Initialized for correct starting behaviour.
+ * 	- call_func = FALSE					no key was pressed yet
+ * 	- update_display = TRUE 			update display so initial Time_conf mode is displayed
+ * 	- update_measurement = TRUE			get first measurment
+ * 	- change_toggle_view_mode = TRUE 	start toggling view mode when toggle view mode is selected
+ * 	- ready_to_calc_humidity = FALSE	no value received from adc yet
+ */
+uint8_t call_func = FALSE;
+uint8_t update_display = TRUE;
+uint8_t update_measurment = TRUE;
+uint8_t change_toggle_view_mode = TRUE;
+uint8_t ready_to_calc_humidity = FALSE;
+
+/*
+ * Flag used to prevent time updates while the Time_conf mode is displayed.
+ * Time has to be configured after start, so time is stopped at first
+*/
+uint8_t time_stopped = TRUE;
+
+/*
+ * Current view mode, to tell the display how to prepare given data and display it.
+ * Starts in Time_conf mode to configure the current time.
+ * While in Time_conf mode the displays cursor is in 3 out of 4 possible selected
+ * positions blinking. current_selected tells the display which position is being modified now.
+ * After start shows cursor over hours.
+ */
+enum View_mode current_mode = Time_conf;
+enum Time_frac_selected current_selected = hours_sel;
+
+/*
+ * Structs which are updated by RTC and hold currently set time and date.
+ */
+RTC_DateTypeDef gDate = {0};
+RTC_TimeTypeDef gTime = {0};;
+
+/*
+ * Stores the current read and calculated temperature to be displayed.
+ * Initially has 0, as no measurment value.
+ */
+int16_t current_temperature = 0;
+
+/*
+ * Stores for humidity value received by ADC in humidity_uncalculated.
+ * humidity_calculated stores the percentage after calculations.
+ */
+uint32_t humidity_uncalculated = 0;
+uint16_t humidity_calculated = 0;
+/* USER CODE END PV */
+
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+static void MX_GPIO_Init(void);
+static void MX_TIM6_Init(void);
+static void MX_RTC_Init(void);
+static void MX_ADC_Init(void);
+static void MX_USART2_UART_Init(void);
+/* USER CODE BEGIN PFP */
+void get_time();
+void select_next_time_frac();
+void select_previous_time_frac();
+void inc_currently_selected();
+void dec_currently_selected();
+void next_view_mode();
+void time_conf_mode();
+void nop();
+void change_timeformat();
+void exit_time_conf();
+uint16_t calculateHumidity(uint32_t uncalc_value);
+/* USER CODE END PFP */
+
+/* Private user code ---------------------------------------------------------*/
+/* USER CODE BEGIN 0 */
+/**
+ * @brief Updates values of gTime and gDate. For handling the time displayed.
+ * @param None
+ * @retval None
+ */
+void get_time(void) {
+	if(!time_stopped) {									// only update when time is not stopped
+	  HAL_RTC_GetTime(&hrtc, &gTime, RTC_FORMAT_BIN);	// updates time value in struct gTime
+	  HAL_RTC_GetDate(&hrtc, &gDate, RTC_FORMAT_BIN);	// necessary, otherwise time won't get updated
+	}
+}
+
+/**
+ * @brief Changes to display output to next view mode.
+ * @param None
+ * @retval None
+ */
+void next_view_mode(void) {
+	if (current_mode == Time_conf) exit_time_conf();
+	else current_mode = (current_mode+1) % Time_conf;	// Time_conf isn't accessible via next_mode
+}
+
+/**
+ * @brief Stops the time updates, enters Time_conf view mode and sets the cursor
+ * 		  to select hours.
+ * @param None
+ * @retval None
+ */
+void time_conf_mode(void) {
+	time_stopped = TRUE;
+	current_mode = Time_conf;
+	current_selected = hours_sel;
+}
+
+/**
+ * @brief Reenables time updates, sets the RTC time, disables the cursor and
+ * 		  changes view mode to Time_and_temp. Only possible when in Time_conf mode.
+ * @param None
+ * @retval None
+ */
+void exit_time_conf(void) {
+	if (current_mode == Time_conf) {
+		time_stopped = FALSE;
+		HAL_RTC_SetTime(&hrtc, &gTime, RTC_FORMAT_BIN);
+		current_selected = None_sel;
+		current_mode = Time_and_Temp;			// start in first view mode afterwards
+	}
+}
+
+/**
+ * @brief Toggles the clocks time format from 24h to 12h or vice versa.
+ * 		  While changing from 24h to 12h format does not take AM and PM into account.
+ * 		  Expects to convert to PM.
+ * 		  Time has to be configured manually, if current time is AM.
+ * @param None
+ * @retval None
+ */
+void change_timeformat(void) {
+	  if (hrtc.Init.HourFormat == RTC_HOURFORMAT_24) {
+		  hrtc.Init.HourFormat = RTC_HOURFORMAT_12;
+		  gTime.Hours = gTime.Hours % 12;
+	  } else {
+		  hrtc.Init.HourFormat = RTC_HOURFORMAT_24;
+		  gTime.Hours = gTime.Hours + 12;
+	  }
+	  HAL_RTC_SetTime(&hrtc, &gTime, RTC_FORMAT_BIN);
+	  HAL_RTC_Init(&hrtc);
+}
+
+/**
+ * @brief While in Time_conf mode, cursor is set to position which is selected for changing.
+ * 		  This function moves the cursor to the right, starting at hours if seconds was selected.
+ * @param None
+ * @retval None
+ */
+void select_next_time_frac(void) {
+	if (current_mode == Time_conf) {
+		current_selected = (current_selected+1) % (None_sel);
+	}
+}
+
+/**
+ * @brief While in Time_conf mode, cursor is set to position which is selected for changing.
+ * 		  This function moves the cursor to the left, starting at seconds if hours was selected.
+ * @param None
+ * @retval None
+ */
+void select_previous_time_frac(void) {
+	if (current_mode == Time_conf) {
+		if (current_selected == 0) current_selected = secs_sel;
+		else current_selected = (current_selected-1) % (None_sel);
+	}
+}
+
+/**
+ * @brief While in Time_conf mode, cursor is set to position which is selected for changing.
+ * 		  Increases the currently selected position by 1 hour/minute/second. Also prevents
+ * 		  incorrect values from being set. Updates display after each change.
+ * @param None
+ * @retval None
+ */
+void inc_currently_selected(void) {
+	switch (current_selected) {
+	case hours_sel: {
+		if (hrtc.Init.HourFormat == RTC_HOURFORMAT_24) 	gTime.Hours = (gTime.Hours + 1) % 24;
+
+		else gTime.Hours = (gTime.Hours + 1) % 12;
+		break;
+	}
+	case mins_sel: {
+		gTime.Minutes = (gTime.Minutes + 1) % 60;
+		break;
+	}
+	case secs_sel: {
+		gTime.Seconds = (gTime.Hours + 1) % 60;
+		break;
+	}
+	case None_sel: {
+		break;
+	}
+	write_to_display(humidity_calculated, current_temperature, gTime, current_mode, current_selected, change_toggle_view_mode);
+	}
+}
+
+/**
+ * @brief While in Time_conf mode, cursor is set to position which is selected for changing.
+ * 		  Decreases the currently selected position by 1 hour/minute/second. Also prevents
+ * 		  incorrect values from being set. Updates display after each change.
+ * @param None
+ * @retval None
+ */
+void dec_currently_selected(void) {
+	switch (current_selected) {
+	case hours_sel: {
+		if (hrtc.Init.HourFormat == RTC_HOURFORMAT_24) {
+			if (gTime.Hours == 0) gTime.Hours = 23;
+			else gTime.Hours--;
+		}
+		else {
+			if (gTime.Hours == 0) gTime.Hours = 11;
+			else gTime.Hours--;;
+		}
+		break;
+	}
+	case mins_sel: {
+		if (gTime.Minutes == 0) gTime.Minutes = 59;
+		else gTime.Minutes--;
+		break;
+	}
+	case secs_sel: {
+		if (gTime.Seconds == 0) gTime.Seconds = 59;
+		gTime.Seconds--;
+		break;
+	}
+	case None_sel: {
+		break;
+	}
+	write_to_display(humidity_calculated, current_temperature, gTime, current_mode, current_selected, change_toggle_view_mode);
+	}
+}
+
+/**
+ * @brief Dummy function which is called as default function if no button has been
+ * 		  pressed during the last period.
+ * @param None
+ * @retval None
+ */
+void nop(void) {
+}
+
+/*
+ * Array which represents the keypad button assignment. Functions map 1 to 1 to keypad.
+ * E.g. 1 = nop, 2 = inc_currently_selected, 3 = nop, 4 = next_view_mode	and so on.
+ * ________________
+ * | 1	2	3	A |
+ * | 4	5	6	B |
+ * | 7	8	9	C |
+ * | *	0	#	D |
+ * ________________
+ */
+void (*funcs[4][4])(void) = {
+		{nop,			 			inc_currently_selected,		nop,					next_view_mode},
+		{select_previous_time_frac,	exit_time_conf,				select_next_time_frac, 	nop},
+		{nop,			 			dec_currently_selected,		nop,         			time_conf_mode},
+		{nop,			 			nop,			   			nop,  					change_timeformat}
+};
+
+/**
+  * @brief Function used to calculate humidity dependent on the measured voltage at the potentiometer.
+  * @param uint32_t uncalculated value from ADC.
+  * @retval uint16_t the calculated humidity.
+  */
+uint16_t calculateHumidity(uint32_t uncalc_value) {
+	return (100 * uncalc_value) >> 12;
+}
+
+/* USER CODE END 0 */
+
+/**
+  * @brief  The application entry point.
+  * @retval int
+  */
+int main(void)
+{
+  /* USER CODE BEGIN 1 */
+
+  /* USER CODE END 1 */
+  
+
+  /* MCU Configuration--------------------------------------------------------*/
+
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+  HAL_Init();
+
+  /* USER CODE BEGIN Init */
+
+  /* USER CODE END Init */
+
+  /* Configure the system clock */
+  SystemClock_Config();
+
+  /* USER CODE BEGIN SysInit */
+
+  /* USER CODE END SysInit */
+
+  /* Initialize all configured peripherals */
+  MX_GPIO_Init();
+  MX_TIM6_Init();
+  MX_RTC_Init();
+  MX_ADC_Init();
+  MX_USART2_UART_Init();
+  /* USER CODE BEGIN 2 */
+  /* Start main timer */
+  HAL_TIM_Base_Start_IT(&htim6);
+  /* Initialize the display */
+  init_display();
+  /* Set default function to dummy */
+  default_func_ptr = nop;
+  /* No button was pressed initally. Set next function call to nop */
+  func_to_call_next_ptr = default_func_ptr;
+  /* Start ADC in Interrupt mode to get first measurment */
+  HAL_ADC_Start_IT(&hadc);
+  /* USER CODE END 2 */
+
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
+  while (1)
+  {
+	  /* Delay for next function call ended, flag was set */
+	  if (call_func) {
+		  	(*func_to_call_next_ptr)();					// call function currently selected
+		  	func_to_call_next_ptr = default_func_ptr;	// reset pointer to default_func_ptr (nop)
+		  	call_func = FALSE;							// reset flag
+	  	}
+	  /* Delay for next measurement update ended, flag was set */
+	  if (update_measurment) {
+		  HAL_ADC_Start_IT(&hadc);						// Start ADC measurement in Interrupt mode
+		  current_temperature = get_temperature();		// Get temperature reading from DS1820
+		  update_measurment = FALSE;					// reset flag
+	  }
+	  /* ADC measurement ended, flag was set by ADC interrupt, percentage value may be calculated */
+	  if (ready_to_calc_humidity) {
+		  humidity_calculated = calculateHumidity(humidity_uncalculated);	// calculate percentage
+		  ready_to_calc_humidity = FALSE;									// reset flag
+	  }
+	  /* Display update period ended, flag was set */
+	  if (update_display) {
+		  get_time();									// update the time
+		  write_to_display(humidity_calculated,			// send to display, percentage humidity
+				  current_temperature,					// current temperature
+				  gTime,								// struct that contains current time
+				  current_mode,							// current display mode
+				  current_selected,						// if Time_conf mode, selected time fraction
+				  change_toggle_view_mode);				// if Toggle mode
+		  update_display = FALSE;						// reset flag
+	  }
+
+    /* USER CODE END WHILE */
+
+    /* USER CODE BEGIN 3 */
+  }
+  /* USER CODE END 3 */
+}
+
+/**
+  * @brief System Clock Configuration
+  * @retval None
+  */
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+  RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
+
+  /** Configure LSE Drive Capability 
+  */
+  HAL_PWR_EnableBkUpAccess();
+  __HAL_RCC_LSEDRIVE_CONFIG(RCC_LSEDRIVE_HIGH);
+  /** Initializes the CPU, AHB and APB busses clocks 
+  */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_HSI14
+                              |RCC_OSCILLATORTYPE_LSE;
+  RCC_OscInitStruct.LSEState = RCC_LSE_ON;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.HSI14State = RCC_HSI14_ON;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.HSI14CalibrationValue = 16;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL12;
+  RCC_OscInitStruct.PLL.PREDIV = RCC_PREDIV_DIV1;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /** Initializes the CPU, AHB and APB busses clocks 
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_RTC;
+  PeriphClkInit.RTCClockSelection = RCC_RTCCLKSOURCE_LSE;
+  if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/**
+  * @brief ADC Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_ADC_Init(void)
+{
+
+  /* USER CODE BEGIN ADC_Init 0 */
+
+  /* USER CODE END ADC_Init 0 */
+
+  ADC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN ADC_Init 1 */
+
+  /* USER CODE END ADC_Init 1 */
+  /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion) 
+  */
+  hadc.Instance = ADC1;
+  hadc.Init.ClockPrescaler = ADC_CLOCK_ASYNC_DIV1;
+  hadc.Init.Resolution = ADC_RESOLUTION_12B;
+  hadc.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc.Init.ScanConvMode = ADC_SCAN_DIRECTION_FORWARD;
+  hadc.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  hadc.Init.LowPowerAutoWait = DISABLE;
+  hadc.Init.LowPowerAutoPowerOff = DISABLE;
+  hadc.Init.ContinuousConvMode = DISABLE;
+  hadc.Init.DiscontinuousConvMode = DISABLE;
+  hadc.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
+  hadc.Init.DMAContinuousRequests = DISABLE;
+  hadc.Init.Overrun = ADC_OVR_DATA_PRESERVED;
+  if (HAL_ADC_Init(&hadc) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /** Configure for the selected ADC regular channel to be converted. 
+  */
+  sConfig.Channel = ADC_CHANNEL_0;
+  sConfig.Rank = ADC_RANK_CHANNEL_NUMBER;
+  sConfig.SamplingTime = ADC_SAMPLETIME_1CYCLE_5;
+  if (HAL_ADC_ConfigChannel(&hadc, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ADC_Init 2 */
+
+  /* USER CODE END ADC_Init 2 */
+
+}
+
+/**
+  * @brief RTC Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_RTC_Init(void)
+{
+
+  /* USER CODE BEGIN RTC_Init 0 */
+
+  /* USER CODE END RTC_Init 0 */
+
+  RTC_TimeTypeDef sTime = {0};
+  RTC_DateTypeDef sDate = {0};
+
+  /* USER CODE BEGIN RTC_Init 1 */
+
+  /* USER CODE END RTC_Init 1 */
+  /** Initialize RTC Only 
+  */
+  hrtc.Instance = RTC;
+  hrtc.Init.HourFormat = RTC_HOURFORMAT_24;
+  hrtc.Init.AsynchPrediv = 127;
+  hrtc.Init.SynchPrediv = 255;
+  hrtc.Init.OutPut = RTC_OUTPUT_DISABLE;
+  hrtc.Init.OutPutPolarity = RTC_OUTPUT_POLARITY_HIGH;
+  hrtc.Init.OutPutType = RTC_OUTPUT_TYPE_OPENDRAIN;
+  if (HAL_RTC_Init(&hrtc) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /* USER CODE BEGIN Check_RTC_BKUP */
+    
+  /* USER CODE END Check_RTC_BKUP */
+
+  /** Initialize RTC and set the Time and Date 
+  */
+  sTime.Hours = 0x0;
+  sTime.Minutes = 0x0;
+  sTime.Seconds = 0x0;
+  sTime.DayLightSaving = RTC_DAYLIGHTSAVING_NONE;
+  sTime.StoreOperation = RTC_STOREOPERATION_RESET;
+  if (HAL_RTC_SetTime(&hrtc, &sTime, RTC_FORMAT_BCD) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sDate.WeekDay = RTC_WEEKDAY_MONDAY;
+  sDate.Month = RTC_MONTH_JANUARY;
+  sDate.Date = 0x1;
+  sDate.Year = 0x0;
+
+  if (HAL_RTC_SetDate(&hrtc, &sDate, RTC_FORMAT_BCD) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN RTC_Init 2 */
+
+  /* USER CODE END RTC_Init 2 */
+
+}
+
+/**
+  * @brief TIM6 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM6_Init(void)
+{
+
+  /* USER CODE BEGIN TIM6_Init 0 */
+
+  /* USER CODE END TIM6_Init 0 */
+
+  /* USER CODE BEGIN TIM6_Init 1 */
+
+  /* USER CODE END TIM6_Init 1 */
+  htim6.Instance = TIM6;
+  htim6.Init.Prescaler = 479;
+  htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim6.Init.Period = 625;
+  htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  if (HAL_TIM_Base_Init(&htim6) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM6_Init 2 */
+
+  /* USER CODE END TIM6_Init 2 */
+
+}
+
+/**
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART2_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART2_Init 0 */
+
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 38400;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart2.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart2.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {	  /* ADC measurement ended, flag was set by ADC interrupt, percentage value may be calculated */
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART2_Init 2 */
+
+  /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
+  * @brief GPIO Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_GPIO_Init(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOF_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(OneWire_DS1820_GPIO_Port, OneWire_DS1820_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOA, LD2_Pin|DB7_Pin|LCD_RS_Pin|col1_Pin 
+                          |col0_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, DB6_Pin|col3_Pin|col2_Pin|LCD_Enable_Pin 
+                          |DB5_Pin|DB4_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : OneWire_DS1820_Pin */
+  GPIO_InitStruct.Pin = OneWire_DS1820_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(OneWire_DS1820_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : LD2_Pin col1_Pin col0_Pin */
+  GPIO_InitStruct.Pin = LD2_Pin|col1_Pin|col0_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : row3_INT_Pin row0_INT_Pin row1_INT_Pin row2_INT_Pin */
+  GPIO_InitStruct.Pin = row3_INT_Pin|row0_INT_Pin|row1_INT_Pin|row2_INT_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : DB6_Pin LCD_Enable_Pin DB5_Pin DB4_Pin */
+  GPIO_InitStruct.Pin = DB6_Pin|LCD_Enable_Pin|DB5_Pin|DB4_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : col3_Pin col2_Pin */
+  GPIO_InitStruct.Pin = col3_Pin|col2_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : DB7_Pin LCD_RS_Pin */
+  GPIO_InitStruct.Pin = DB7_Pin|LCD_RS_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI0_1_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI0_1_IRQn);
+
+  HAL_NVIC_SetPriority(EXTI4_15_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI4_15_IRQn);
+
+}
+
+/* USER CODE BEGIN 4 */
+/**
+ * @brief EXTI line detection callbacks.
+ * @param GPIO_PIN: Specifies the pins connected EXTI line
+ * @retval None
+ */
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
+	switch(GPIO_Pin) {
+		case row0_INT_Pin: {
+			func_to_call_next_ptr = funcs[0][colCounter];
+			} break;
+		case row1_INT_Pin: {
+			func_to_call_next_ptr = funcs[1][colCounter];
+			} break;
+		case row2_INT_Pin: {
+			func_to_call_next_ptr = funcs[2][colCounter];
+			} break;
+		case row3_INT_Pin: {
+			func_to_call_next_ptr = funcs[3][colCounter];
+		} break;
+	}
+}
+
+
+/**
+ * @brief TIM Period Elapsed Callback handler.
+ * @param *htim: Timer interrupt source
+ * @retval None
+ */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
+	if (htim == &htim6) {
+		/* Setting flags for next main loop iteration and reset counter */
+		if (call_counter == READYTOCALLFUNC) {
+			call_func = TRUE;
+			call_counter = 0;
+		}
+		if (display_counter == DISPLAYUPDATE) {
+			update_display = TRUE;
+			display_counter = 0;
+		}
+		if (measurement_counter == MEASUREMENT) {
+			update_measurment = TRUE;
+			measurement_counter = 0;
+		}
+		if (toggle_view_mode_counter == TOOGLEMODE) {
+			if (change_toggle_view_mode == TRUE) {
+				change_toggle_view_mode = FALSE;
+			} else {
+				change_toggle_view_mode = TRUE;
+			}
+			toggle_view_mode_counter = 0;
+		}
+		/* Increment all counter */
+		call_counter++;
+		display_counter++;
+		measurement_counter++;
+		toggle_view_mode_counter++;
+		/* Toggle Pin for multiplexing */
+		HAL_GPIO_TogglePin(GPIO_PORTS[colCounter], GPIO_PINS[colCounter]);
+		if (current_Port_active) {
+			current_Port_active = FALSE;
+			colCounter = (colCounter + 1) % 4;
+		} else {
+			current_Port_active = TRUE;
+		}
+
+	}
+}
+
+/**
+ * @brief Handler for ADC conversion complete callback.
+ * @param *hadc: ADC interrupt source
+ * @retval None
+ */
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc) {
+	/* Store value in global */
+	humidity_uncalculated = HAL_ADC_GetValue(hadc);
+	/* Set flag, so percentage is calculated in next main loop iteration */
+	ready_to_calc_humidity = TRUE;
+}
+
+/* USER CODE END 4 */
+
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
+void Error_Handler(void)
+{
+  /* USER CODE BEGIN Error_Handler_Debug */
+  /* User can add his own implementation to report the HAL error return state */
+
+  /* USER CODE END Error_Handler_Debug */
+}
+
+#ifdef  USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
+void assert_failed(char *file, uint32_t line)
+{ 
+  /* USER CODE BEGIN 6 */
+  /* User can add his own implementation to report the file name and line number,
+     tex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* USER CODE END 6 */
+}
+#endif /* USE_FULL_ASSERT */
+
+/************************ (C) COPYRIGHT STMicroelectronics *****END OF FILE****/

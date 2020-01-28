@@ -1,0 +1,47 @@
+/**
+  ******************************************************************************
+  * @file           : delayus_lib.c
+  * @brief          : Implements Functions to delay in microseconds
+  ******************************************************************************
+  *
+  * @author			: Felix Lohse & Arne Bruhns
+  *
+  *
+  ******************************************************************************
+  */
+
+#include "delayus_lib.h"
+
+/**
+  * @brief Delay in microseconds
+  * @param us to wait
+  * @retval None
+  * @pragmas used to turn off compiler optimization to ensure delay time is actually 1 us
+  */
+
+#pragma GCC push_options
+#pragma GCC optimize ("O0")
+inline void delayUs(uint16_t us) {
+	volatile uint16_t counter = 3 * us; // 3 - 5 ? 3 bietet solidesten Werte und laut Heimoszi auch am dichtesten TODO
+										// 1 ergibt saubere 1us
+	while(counter--);
+}
+#pragma GCC pop_options
+
+
+/*
+void delayUs(uint16_t us){
+	do {
+	asm volatile (
+
+			"MOV R0,%[loops]\n\t"\
+			"1: \n\t"\
+			"SUB R0, #1\n\t"\
+			"CMP R0, #0\n\t"\
+			"BNE 1b \n\t" : : [loops] "r" (6*us) : "memory"\
+
+		      );
+	} while(0);
+}
+
+*/

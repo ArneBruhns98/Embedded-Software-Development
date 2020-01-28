@@ -1,0 +1,23 @@
+/**
+  ******************************************************************************
+  * @file           : ADC_Potentiometer.c
+  * @brief          : Implements Functions to determine the humidity
+  ******************************************************************************
+  *
+  * @author			: Felix Lohse & Arne Bruhns
+  *
+  *
+  ******************************************************************************
+  */
+
+#include "ADC_Potentiometer.h"
+
+/**
+  * @brief Function used to calculate humidity dependent on the measured voltage at the potentiometer.
+  * @param ADC_HandleTypeDef* hadc address of the ADC handle structure definition.
+  * @retval uint32_t the calculated humidity.
+  */
+uint16_t calculateHumidity(uint32_t uncalc_value) {
+	return (100 * uncalc_value) >> 12;
+}
+

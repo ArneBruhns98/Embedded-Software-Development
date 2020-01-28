@@ -1,0 +1,175 @@
+/**
+  ******************************************************************************
+  * @file           : LCD_2x16.h
+  * @brief          : Header for LCD_2x16.h.c file.
+  *                   This file contains the headers of the functions used for
+  *                   handling the LCD screen in our project. E.g. Settings modes,
+  *                   printing text to screen...
+  *                   This is not general purpose but rather specific for our
+  *                   weatherstation.
+  ******************************************************************************
+  *
+  * @author			: Felix Lohse & Arne Bruhns
+  *
+  *
+  ******************************************************************************
+  */
+
+/* Define to prevent recursive inclusion -------------------------------------*/
+#ifndef __LCD_2X16_H
+#define __LCD_2X16_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+
+/* Used for types like uint16_t ----------------------------------------------*/
+#include "stm32f0xx_hal.h"
+
+
+/* Used for GPIO Ports and Pins ----------------------------------------------*/
+#include "main.h"
+
+/* Used for delay in us function ---------------------------------------------*/
+#include "delayus_lib.h"
+
+/* Used for strlen() ---------------------------------------------------------*/
+#include <string.h>
+
+/* Used for sprintf() --------------------------------------------------------*/
+#include <stdio.h>
+
+
+/* Instructions for the display --------------------------------------------------*/
+#define LCD_8BIT_MODE 		0x30
+#define LCD_4BIT_MODE 		0x20
+#define LCD_TWOLINES_5_8  	0x28
+#define DISPLAY_OFF	  		0x04
+#define CLEAR_DISPLAY 		0x01
+#define DISPLAY_ON	  		0x0C
+#define CURSOR_ON		    0x0E
+#define CURSOR_ON_BLINKING  0x0F
+#define CURSOR_OFF_BLINKING	0x0D
+#define CURSOR_OFF			0x0C
+#define HOME				0x02
+#define SET_CURSOR_SEC_LINE 0xC0
+#define SET_CURSOR_HOURS	0x85
+#define SET_CURSOR_MINS		0x88
+#define SET_CURSOR_SECS		0x8B
+
+/* View_mode represents the currently set mode, for template selection ---------*/
+enum View_mode
+{
+	Time_only,					// Only current Time is shown in first row
+	Time_and_Temp,				// Temp in first row, time in second
+	Temp_and_humidity,			// Temp in first row, humidity in second
+	Temp_humi_and_clock,		// Temp and humidity alternating with Time_only
+	Time_conf					// Time is shown in first row, has blinking cursor
+};
+
+/* Used to show selected part of time for changing purpose in Time_conf---------*/
+enum Time_frac_selected
+{
+	hours_sel,
+	mins_sel,
+	secs_sel,
+	None_sel
+};
+
+
+
+/* String literals that represent the formats for creating the output on rows --*/
+static const char* const time_only_first_row = "    %02d:%02d:%02d    ";
+static const char* const time_second_row = "        %02d:%02d:%02d";
+static const char* const empty_row = "                 ";
+static const char* const temp_row = "    %s%d.%d""\xDF""C     ";
+static const char* const humidity_row = "       %d%%       "; // double % for escaping
+
+
+/**
+  * @brief Sets register select pin low in preparation for sending
+  * 	   instructions to the display
+  * @retval None
+  */
+void setRSInstruction();
+
+/**
+  * @brief Sets register select pin high in preparation for sending
+  * 	   data to the display
+  * @retval None
+  */
+void setRSData();
+
+/**
+  * @brief Sends an enable pulse to the display by setting the enable
+  * 	   pin to high, 1 us delay, then to low, 1 us delay.
+  * 	   This is needed to tell the display to process currently set
+  * 	   bit string on inputs DB4-DB7.
+  * @retval None
+  */
+void send_enable_pulse();
+
+/**
+  * @brief Initializes the display by following the sequence from the datasheet
+  * 	   and hints from problem definition. Sequence is:
+  * 	   		- Wait for Power Delay 50ms
+  * 	   		- Set 8 bit mode
+  * 	   		- Set 8 bit mode
+  * 	   		- Set 4 bit mode
+  * 	   		- Configure display to 2 lines and 5*8 characters
+  * 	   		- Turn display off
+  * 	   		- Clear display
+  * 	   		- Turn display on
+  * 	   	Afterwards the display is ready to use.
+  * @retval None
+  */
+void init_display();
+
+/**
+  * @brief First sends a high nibble then a low nibble to the display each followed
+  * 	   by an enable pulse. This function is specific to 4 bit mode. As it splits
+  * 	   the parameter byte into to nibbles and sends them separatly. Not usable
+  * 	   for 8 bit mode.
+  * @param uint8_t byte byte as data or instruction to send to the display. Can be
+  * 					 a instruction from the defined instructions in this file or a char
+  * 					 as data.
+  * @retval None
+  */
+void send_byte_to_lcd(uint8_t byte);
+
+/**
+  * @brief Separate function to specifically send instructions to the display.
+  * 	   Encapsules register selection sending instruction and waiting for the display
+  * 	   to process the instruction
+  * @param uint8_t byte instruction to send. Use only instructions defined in this file.
+  * @retval None
+  */
+void send_instruction(uint8_t byte);
+
+/**
+  * @brief Separate function to specifically send data to the display.
+  * 	   Encapsules register selection sending data and waiting for the display
+  * 	   to process the instruction
+  * @param uint8_t byte instruction to send. Use only instruction defined in this file.
+  * @retval None
+  */
+void send_data(uint8_t byte);
+
+/**
+  * @brief Actually writes data to the screen. Fills templates specified by parameter mode
+  * 	   using result from get_temperature() called in main, the fields hours, mins, secs
+  * 	   from the RTC_TimeTypeDef and the humidity TODO expand when humidity is implemented
+  * @param float temperature representation of the read temperature, value is received by get_temperature()
+  * 						 in main
+  * @param RTC_TimeTypeDef gTime typedef containing current time info, handled by RTC
+  * @param enum View_mode mode currently selected view mode to choose from templates
+  * @retval None
+  */
+void write_to_display(uint16_t humidity, int16_t temperature, RTC_TimeTypeDef gTime, enum View_mode mode, enum Time_frac_selected selected, uint8_t toggle_mode);
+
+
+#ifdef __cplusplus
+}
+#endif
+#endif /* __LCD_2X16_H */
